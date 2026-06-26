@@ -27,3 +27,9 @@ env/
 .DS_Store
 
 *.jsonl
+
+# Private strategy doc — full blueprint (moat, pricing, market, roadmap).
+# Kept in the working tree for local/agent reference; never published.
+# The public technical architecture lives in docs/ARCHITECTURE.md.
+SYNTHBENCH-BLUEPRINT.md
+.private/

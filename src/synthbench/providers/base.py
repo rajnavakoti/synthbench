@@ -1,26 +1,56 @@
-"""Abstract provider adapter interface.
+"""Abstract provider adapter interface and its generation vocabulary.
 
-Each adapter normalizes a provider-specific API into one interface the workload
-engine drives: ``submit`` a request, ``poll`` until it is done, ``retrieve`` the
-artifact, plus ``estimate_cost`` and ``parse_rate_limit``.
+The adapter layer normalizes provider-specific APIs into one lifecycle the
+workload engine drives:
 
-The lifecycle is modeled around async job queues (the general case for image and
+    GenerationRequest  ->  GenerationJob  ->  GenerationArtifact
+       (what we ask)        (lifecycle)        (raw bytes + type)
+
+From a terminal job the *engine* (not the adapter) builds the benchmarkable
+``GenerationResult`` in ``synthbench.models`` — adapters return raw outputs;
+the engine owns timing, cost roll-up, and scoring. Keeping that boundary sharp
+is what lets one adapter instance stay stateless and reusable across concurrent
+requests: all per-request state lives on the ``GenerationJob``, never on the
+adapter.
+
+The lifecycle is modeled on async job queues (the general case for image and
 video providers in later phases). Synchronous providers — most TTS APIs return
-audio in a single response — complete the work in ``submit`` and hand back a
-``GenerationJob`` that already carries the artifact, so ``poll`` and ``retrieve``
-are trivial. Carrying state on the job (not the adapter) keeps a single adapter
-instance safe to share across concurrent requests.
+audio in a single response — complete the work in ``submit`` and return a job
+already in a terminal ``SUCCEEDED`` state carrying the artifact, so ``poll`` and
+``retrieve`` are trivial.
 """
 
+import hashlib
+import json
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
+
+# A plain USD amount. Aliased for readability at call sites and to leave room to
+# promote it to a richer CostEstimate later without churning every signature.
+CostUsd = float
 
 
 class ProviderError(Exception):
     """Raised when a provider request fails or an adapter is misconfigured.
 
     Carries a user-facing message; the CLI surfaces it without a traceback.
+    Transport/HTTP failures raise this (the engine catches it and records a
+    failed result). A remote job that *reports* failure is instead surfaced as
+    ``GenerationStatus.FAILED`` on the job — see the module docstring.
     """
+
+
+class GenerationStatus(StrEnum):
+    """Lifecycle state of a single generation request."""
+
+    PENDING = "pending"  # submitted, not yet started (async queue)
+    RUNNING = "running"  # in progress (async)
+    SUCCEEDED = "succeeded"  # artifact available
+    FAILED = "failed"  # provider/remote-reported failure (error set)
+    CANCELLED = "cancelled"  # engine stopped tracking (budget guard, timeout)
 
 
 @dataclass
@@ -32,19 +62,81 @@ class RateLimitInfo:
     limit: int | None = None
 
 
-@dataclass
-class GenerationJob:
-    """Handle to an in-flight or completed generation request.
+@dataclass(frozen=True)
+class GenerationRequest:
+    """Immutable description of one generation to perform.
 
-    Synchronous providers return a job with ``done=True`` and ``artifact`` set.
-    Async providers return a pending job whose ``id`` the engine polls until the
-    artifact is ready, then downloads via ``retrieve``.
+    ``provider_params`` carries provider-specific knobs (voice_id, output
+    format, guidance scale…) that the matching adapter understands; it is named
+    explicitly to keep the boundary with future engine-level request fields
+    clear.
     """
 
-    id: str
-    done: bool = False
-    artifact: bytes | None = None
+    prompt: str
+    provider: str
+    model: str | None = None
+    provider_params: Mapping[str, Any] = field(default_factory=dict)
+    index: int | None = None  # engine-assigned position within a run
+
+    @property
+    def input_hash(self) -> str:
+        """Stable hash of the generation inputs — for dedup and baselines.
+
+        Excludes ``index`` (a run-position detail, not a content input) so the
+        same prompt/model/params hashes identically across runs.
+        """
+        payload = json.dumps(
+            {
+                "provider": self.provider,
+                "model": self.model,
+                "prompt": self.prompt,
+                "params": {
+                    k: self.provider_params[k] for k in sorted(self.provider_params)
+                },
+            },
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass
+class GenerationArtifact:
+    """The binary output of a successful generation."""
+
+    data: bytes
+    content_type: str = "application/octet-stream"
+
+    @property
+    def size_bytes(self) -> int:
+        return len(self.data)
+
+
+@dataclass
+class GenerationJob:
+    """Mutable lifecycle handle for one in-flight or completed request.
+
+    Synchronous providers return a job already ``SUCCEEDED`` with ``artifact``
+    set. Async providers return a ``PENDING`` job whose ``provider_job_id`` is
+    polled until terminal, then downloaded via ``retrieve``.
+    """
+
+    request: GenerationRequest
+    status: GenerationStatus = GenerationStatus.PENDING
+    provider_job_id: str | None = None
+    artifact: GenerationArtifact | None = None
+    error: str | None = None
+    estimated_cost_usd: CostUsd = 0.0
+    actual_cost_usd: CostUsd | None = None
     response_headers: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in (
+            GenerationStatus.SUCCEEDED,
+            GenerationStatus.FAILED,
+            GenerationStatus.CANCELLED,
+        )
 
 
 class ProviderAdapter(ABC):
@@ -56,26 +148,31 @@ class ProviderAdapter(ABC):
         """Provider name, used for display and config matching."""
 
     @abstractmethod
-    async def submit(self, prompt: str, params: dict) -> GenerationJob:
+    def estimate_cost_usd(self, request: GenerationRequest) -> CostUsd:
+        """Estimate the USD cost of a single generation before submitting it."""
+
+    @abstractmethod
+    async def submit(self, request: GenerationRequest) -> GenerationJob:
         """Submit a generation request.
 
-        For synchronous providers this performs the full round-trip and returns
-        a completed job. For async providers it enqueues the work and returns a
-        pending job carrying the remote id.
+        Synchronous providers perform the full round-trip and return a terminal
+        job. Async providers enqueue the work and return a ``PENDING`` job
+        carrying the provider-native id. Raises ``ProviderError`` on a
+        transport/HTTP failure.
         """
 
     @abstractmethod
-    async def poll(self, job: GenerationJob) -> bool:
-        """Return ``True`` when ``job`` has completed, polling the remote if needed."""
+    async def poll(self, job: GenerationJob) -> GenerationJob:
+        """Refresh and return ``job`` — querying the remote when needed.
+
+        For synchronous providers the job is already terminal and is returned
+        unchanged.
+        """
 
     @abstractmethod
-    async def retrieve(self, job: GenerationJob) -> bytes:
-        """Return the generated binary artifact for a completed ``job``."""
+    async def retrieve(self, job: GenerationJob) -> GenerationArtifact:
+        """Return the artifact for a succeeded ``job``."""
 
-    @abstractmethod
-    def estimate_cost(self, prompt: str, params: dict) -> float:
-        """Estimate the USD cost of a single generation before submitting it."""
-
-    def parse_rate_limit(self, response_headers: dict) -> RateLimitInfo:
+    def parse_rate_limit(self, response_headers: Mapping[str, str]) -> RateLimitInfo:
         """Parse rate limit info from response headers. Override per provider."""
         return RateLimitInfo()

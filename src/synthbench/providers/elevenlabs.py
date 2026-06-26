@@ -2,8 +2,8 @@
 
 ElevenLabs TTS is synchronous: a single POST to the text-to-speech endpoint
 returns the audio bytes directly. ``submit`` performs that round-trip and
-returns a completed :class:`GenerationJob`; ``poll`` and ``retrieve`` then read
-from the job.
+returns a terminal :class:`GenerationJob`; ``poll`` returns it unchanged and
+``retrieve`` reads the artifact off the job.
 """
 
 import os
@@ -13,7 +13,11 @@ import aiohttp
 from synthbench.config.scenario import ProviderConfig
 from synthbench.pricing import estimate_text_cost
 from synthbench.providers.base import (
+    CostUsd,
+    GenerationArtifact,
     GenerationJob,
+    GenerationRequest,
+    GenerationStatus,
     ProviderAdapter,
     ProviderError,
     RateLimitInfo,
@@ -40,6 +44,17 @@ def _resolve_api_key(config_value: str | None, env_var: str) -> str:
         f"missing ElevenLabs API key: set ${{{env_var}}} or provide "
         "'api_key' in the [provider.elevenlabs] section"
     )
+
+
+def _content_type(output_format: str) -> str:
+    """Map an ElevenLabs output_format to a MIME content type."""
+    if output_format.startswith("mp3"):
+        return "audio/mpeg"
+    if output_format.startswith("pcm"):
+        return "audio/L16"
+    if output_format.startswith("ulaw"):
+        return "audio/basic"
+    return "application/octet-stream"
 
 
 class ElevenLabsAdapter(ProviderAdapter):
@@ -85,22 +100,27 @@ class ElevenLabsAdapter(ProviderAdapter):
     def name(self) -> str:
         return "elevenlabs"
 
+    def estimate_cost_usd(self, request: GenerationRequest) -> CostUsd:
+        model = request.model or self.model
+        return estimate_text_cost(request.prompt, "elevenlabs", model)
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
             self._session = aiohttp.ClientSession()
         return self._session
 
-    async def submit(self, prompt: str, params: dict) -> GenerationJob:
+    async def submit(self, request: GenerationRequest) -> GenerationJob:
         session = await self._get_session()
-        model = params.get("model", self.model)
+        model = request.model or self.model
+        output_format = request.provider_params.get("output_format", self.output_format)
         url = f"{self.base_url}/text-to-speech/{self.voice_id}"
         headers = {
             "xi-api-key": self.api_key,
             "Accept": "audio/mpeg",
             "Content-Type": "application/json",
         }
-        body = {"text": prompt, "model_id": model}
-        query = {"output_format": params.get("output_format", self.output_format)}
+        body = {"text": request.prompt, "model_id": model}
+        query = {"output_format": output_format}
 
         async with session.post(
             url, json=body, headers=headers, params=query
@@ -114,24 +134,24 @@ class ElevenLabsAdapter(ProviderAdapter):
                 )
 
         return GenerationJob(
-            id=resp_headers.get("request-id", "elevenlabs"),
-            done=True,
-            artifact=data,
+            request=request,
+            status=GenerationStatus.SUCCEEDED,
+            provider_job_id=resp_headers.get("request-id"),
+            artifact=GenerationArtifact(
+                data=data, content_type=_content_type(output_format)
+            ),
+            estimated_cost_usd=self.estimate_cost_usd(request),
             response_headers=resp_headers,
         )
 
-    async def poll(self, job: GenerationJob) -> bool:
-        # Synchronous provider — the job is already complete after submit.
-        return job.done
+    async def poll(self, job: GenerationJob) -> GenerationJob:
+        # Synchronous provider — the job is already terminal after submit.
+        return job
 
-    async def retrieve(self, job: GenerationJob) -> bytes:
+    async def retrieve(self, job: GenerationJob) -> GenerationArtifact:
         if job.artifact is None:
             raise ProviderError("ElevenLabs job has no artifact to retrieve")
         return job.artifact
-
-    def estimate_cost(self, prompt: str, params: dict) -> float:
-        model = params.get("model", self.model)
-        return estimate_text_cost(prompt, "elevenlabs", model)
 
     def parse_rate_limit(self, response_headers: dict) -> RateLimitInfo:
         headers = {k.lower(): v for k, v in response_headers.items()}

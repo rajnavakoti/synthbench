@@ -4,8 +4,23 @@ import pytest
 
 from synthbench.config.scenario import ProviderConfig
 from synthbench.pricing import estimate_text_cost
-from synthbench.providers.base import GenerationJob, ProviderError
+from synthbench.providers.base import (
+    GenerationJob,
+    GenerationRequest,
+    GenerationStatus,
+    ProviderError,
+)
 from synthbench.providers.elevenlabs import ElevenLabsAdapter
+
+
+def _request(
+    prompt: str = "hello world",
+    model: str | None = None,
+    **params: object,
+) -> GenerationRequest:
+    return GenerationRequest(
+        prompt=prompt, provider="elevenlabs", model=model, provider_params=params
+    )
 
 
 class _FakeResponse:
@@ -38,27 +53,33 @@ class _FakeSession:
         return self._response
 
 
-async def test_submit_returns_completed_job_with_artifact() -> None:
+async def test_submit_returns_succeeded_job_with_artifact() -> None:
     session = _FakeSession(
         _FakeResponse(status=200, body=b"AUDIODATA", headers={"request-id": "req-1"})
     )
     adapter = ElevenLabsAdapter(api_key="key", voice_id="voice", session=session)
 
-    job = await adapter.submit("hello world", {})
+    job = await adapter.submit(_request())
 
-    assert job.done is True
-    assert job.id == "req-1"
-    assert await adapter.poll(job) is True
-    assert await adapter.retrieve(job) == b"AUDIODATA"
+    assert job.status is GenerationStatus.SUCCEEDED
+    assert job.is_terminal is True
+    assert job.provider_job_id == "req-1"
+    assert job.estimated_cost_usd > 0
+
+    polled = await adapter.poll(job)
+    assert polled.status is GenerationStatus.SUCCEEDED
+
+    artifact = await adapter.retrieve(job)
+    assert artifact.data == b"AUDIODATA"
+    assert artifact.content_type == "audio/mpeg"
+    assert artifact.size_bytes == len(b"AUDIODATA")
 
 
 async def test_submit_sends_correct_request_shape() -> None:
     session = _FakeSession(_FakeResponse())
-    adapter = ElevenLabsAdapter(
-        api_key="secret", voice_id="voice-x", model="eleven_turbo_v2", session=session
-    )
+    adapter = ElevenLabsAdapter(api_key="secret", voice_id="voice-x", session=session)
 
-    await adapter.submit("speak this", {})
+    await adapter.submit(_request(prompt="speak this", model="eleven_turbo_v2"))
 
     url, kwargs = session.calls[0]
     assert url.endswith("/text-to-speech/voice-x")
@@ -72,23 +93,23 @@ async def test_submit_non_200_raises_provider_error() -> None:
     adapter = ElevenLabsAdapter(api_key="key", voice_id="voice", session=session)
 
     with pytest.raises(ProviderError) as exc:
-        await adapter.submit("hi", {})
+        await adapter.submit(_request())
     assert "429" in str(exc.value)
 
 
 async def test_retrieve_without_artifact_raises() -> None:
     adapter = ElevenLabsAdapter(api_key="key", voice_id="voice")
-    job = GenerationJob(id="x", done=True, artifact=None)
+    job = GenerationJob(request=_request(), status=GenerationStatus.SUCCEEDED)
     with pytest.raises(ProviderError):
         await adapter.retrieve(job)
 
 
-async def test_params_override_model_and_format() -> None:
+async def test_provider_params_override_model_and_format() -> None:
     session = _FakeSession(_FakeResponse())
     adapter = ElevenLabsAdapter(api_key="key", voice_id="voice", session=session)
 
     await adapter.submit(
-        "hi", {"model": "eleven_flash_v2", "output_format": "pcm_16000"}
+        _request(prompt="hi", model="eleven_flash_v2", output_format="pcm_16000")
     )
 
     _, kwargs = session.calls[0]
@@ -96,13 +117,23 @@ async def test_params_override_model_and_format() -> None:
     assert kwargs["params"]["output_format"] == "pcm_16000"
 
 
-def test_estimate_cost_delegates_to_pricing() -> None:
+async def test_pcm_output_sets_content_type() -> None:
+    session = _FakeSession(_FakeResponse(body=b"PCMDATA"))
+    adapter = ElevenLabsAdapter(api_key="key", voice_id="voice", session=session)
+    job = await adapter.submit(_request(output_format="pcm_16000"))
+    artifact = await adapter.retrieve(job)
+    assert artifact.content_type == "audio/L16"
+
+
+def test_estimate_cost_usd_delegates_to_pricing() -> None:
     adapter = ElevenLabsAdapter(
         api_key="key", voice_id="voice", model="eleven_multilingual_v2"
     )
-    prompt = "The quick brown fox."
-    expected = estimate_text_cost(prompt, "elevenlabs", "eleven_multilingual_v2")
-    assert adapter.estimate_cost(prompt, {}) == expected
+    request = _request(prompt="The quick brown fox.")
+    expected = estimate_text_cost(
+        request.prompt, "elevenlabs", "eleven_multilingual_v2"
+    )
+    assert adapter.estimate_cost_usd(request) == expected
 
 
 def test_parse_rate_limit_reads_headers() -> None:
