@@ -6,7 +6,12 @@ Quality-under-load benchmarking for AI media generation APIs.
 
 Synthbench produces trusted quality-under-load degradation curves for AI media generation — showing exactly where quality, latency, and cost break as concurrency rises. The degradation curve IS the product.
 
-Full blueprint: `/Users/raj.navakoti/Desktop/github/SYNTHBENCH-BLUEPRINT.md`
+Technical architecture (public, kept in sync with code): [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+Full strategic blueprint (moat, segments, pricing, roadmap) is **private** and
+**not** in version control — it lives as a gitignored `SYNTHBENCH-BLUEPRINT.md`
+in the repo root (mirrored from the workspace copy). Do not commit it or quote
+its strategy sections into public files.
 
 ## Cutting Rule
 

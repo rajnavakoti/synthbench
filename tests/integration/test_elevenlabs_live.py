@@ -10,6 +10,7 @@ import os
 
 import pytest
 
+from synthbench.providers.base import GenerationRequest, GenerationStatus
 from synthbench.providers.elevenlabs import ElevenLabsAdapter
 
 pytestmark = pytest.mark.skipif(
@@ -23,11 +24,15 @@ async def test_live_generation_returns_audio() -> None:
     adapter = ElevenLabsAdapter(
         api_key=os.environ["ELEVENLABS_API_KEY"], voice_id=voice_id
     )
+    request = GenerationRequest(
+        prompt="This is a synthbench integration test.", provider="elevenlabs"
+    )
     try:
-        job = await adapter.submit("This is a synthbench integration test.", {})
-        assert await adapter.poll(job) is True
-        audio = await adapter.retrieve(job)
+        job = await adapter.submit(request)
+        job = await adapter.poll(job)
+        assert job.status is GenerationStatus.SUCCEEDED
+        artifact = await adapter.retrieve(job)
         # A real generation returns a non-trivial audio payload.
-        assert len(audio) > 1000
+        assert artifact.size_bytes > 1000
     finally:
         await adapter.aclose()
