@@ -5,11 +5,13 @@ from collections.abc import Callable
 from synthbench.config.scenario import ProviderConfig
 from synthbench.providers.base import ProviderAdapter, ProviderError
 from synthbench.providers.elevenlabs import ElevenLabsAdapter
+from synthbench.providers.openai_tts import OpenAITTSAdapter
 
 # Maps a provider name (as written in a scenario's ``provider = "..."``) to a
 # factory that builds the adapter from its config section.
 _REGISTRY: dict[str, Callable[[ProviderConfig], ProviderAdapter]] = {
     "elevenlabs": ElevenLabsAdapter.from_config,
+    "openai": OpenAITTSAdapter.from_config,
 }
 
 
