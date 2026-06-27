@@ -1,5 +1,8 @@
 """Tests for the WER scorer (transcription + WER injected — no whisper/jiwer)."""
 
+import asyncio
+import time
+
 import pytest
 
 from synthbench.scoring.audio import wer as wer_module
@@ -48,3 +51,22 @@ async def test_missing_whisper_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     scorer = WERScorer()  # no transcribe_fn -> needs whisper
     with pytest.raises(ScoringError):
         await scorer.score(b"audio", "hello")
+
+
+async def test_concurrent_scoring_serializes_transcription() -> None:
+    # Regression test: one Whisper model is shared across concurrent scorings,
+    # and its inference is not thread-safe. Transcription must never overlap, or
+    # outputs get corrupted (which produced fake "degradation" in a real run).
+    state = {"active": 0, "max_active": 0}
+
+    def transcribe_fn(data: bytes) -> str:
+        state["active"] += 1
+        state["max_active"] = max(state["max_active"], state["active"])
+        time.sleep(0.02)  # hold the model so any overlap would be observed
+        state["active"] -= 1
+        return "the text"
+
+    scorer = WERScorer(transcribe_fn=transcribe_fn, wer_fn=lambda ref, hyp: 0.0)
+    await asyncio.gather(*(scorer.score(b"x", "the text") for _ in range(8)))
+
+    assert state["max_active"] == 1  # transcription ran strictly one at a time
