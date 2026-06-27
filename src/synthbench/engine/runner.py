@@ -11,10 +11,12 @@ quality metrics (Epic 6); with none, results carry latency/cost/success only.
 """
 
 import asyncio
+import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from math import ceil, floor
+from pathlib import Path
 from statistics import mean
 
 from synthbench.config.scenario import Scenario
@@ -40,6 +42,16 @@ from synthbench.scoring.base import Scorer
 POLL_INTERVAL_S = 0.5
 _BACKOFF_BASE_S = 0.5
 
+# Content-type -> file extension for saved artifacts.
+_AUDIO_EXT = {
+    "audio/mpeg": "mp3",
+    "audio/wav": "wav",
+    "audio/L16": "pcm",
+    "audio/aac": "aac",
+    "audio/flac": "flac",
+    "audio/opus": "opus",
+}
+
 
 @dataclass
 class ProgressEvent:
@@ -60,22 +72,51 @@ async def run_scenario(
     *,
     scorers: list[Scorer] | None = None,
     on_progress: ProgressCallback | None = None,
+    artifact_dir: Path | None = None,
 ) -> RunResult:
-    """Run every concurrency level and return the aggregated result."""
+    """Run every concurrency level and return the aggregated result.
+
+    When ``artifact_dir`` is set, every generated clip is written to
+    ``artifact_dir/audio/`` and a ``manifest.json`` (prompt, transcription,
+    scores, latency, cost per clip) is written alongside — so a paid run's
+    outputs can always be replayed and ground-truthed by ear.
+    """
     scorers = scorers or []
     guard = BudgetGuard(scenario.budget_limit_usd, scenario.budget_guard_pct)
     model = scenario.provider_config.model
     started = time.perf_counter()
 
+    audio_dir: Path | None = None
+    manifest: list[dict] = []
+    if artifact_dir is not None:
+        artifact_dir = Path(artifact_dir)
+        audio_dir = artifact_dir / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
     concurrency_results: list[ConcurrencyResult] = []
     for level in scenario.concurrency:
         result = await _run_level(
-            level, scenario, adapter, prompts, model, guard, scorers, on_progress
+            level,
+            scenario,
+            adapter,
+            prompts,
+            model,
+            guard,
+            scorers,
+            on_progress,
+            audio_dir,
+            manifest,
         )
         concurrency_results.append(result)
         # Budget guard halts the whole run, not just the current level.
         if guard.exceeded:
             break
+
+    if artifact_dir is not None:
+        manifest.sort(key=lambda record: (record["concurrency"], record["index"]))
+        (artifact_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
 
     return RunResult(
         scenario_name=scenario.name,
@@ -98,6 +139,8 @@ async def _run_level(
     guard: BudgetGuard,
     scorers: list[Scorer],
     on_progress: ProgressCallback | None,
+    audio_dir: Path | None,
+    manifest: list[dict],
 ) -> ConcurrencyResult:
     num_requests = level * scenario.requests_multiplier
     semaphore = asyncio.Semaphore(level)
@@ -125,6 +168,12 @@ async def _run_level(
         # and must not hold a provider slot, which would throttle real load.
         if result.success and artifact is not None and scorers:
             result.scores = await _score(artifact, request.prompt, scorers)
+        if audio_dir is not None:
+            record = _persist_artifact(
+                audio_dir, level, index, request, result, artifact
+            )
+            async with results_lock:
+                manifest.append(record)
         async with results_lock:
             results.append(result)
         if on_progress is not None:
@@ -134,6 +183,41 @@ async def _run_level(
     outcomes = await asyncio.gather(*(worker(i) for i in range(num_requests)))
     incomplete = sum(1 for ran in outcomes if not ran)
     return _aggregate(level, results, incomplete)
+
+
+def _persist_artifact(
+    audio_dir: Path,
+    level: int,
+    index: int,
+    request: GenerationRequest,
+    result: GenerationResult,
+    artifact: GenerationArtifact | None,
+) -> dict:
+    """Write a generated clip to disk and return its manifest record.
+
+    Failed generations have no file but are still recorded (with their error) so
+    the manifest is a complete account of what the paid run produced.
+    """
+    file_ref: str | None = None
+    if artifact is not None:
+        ext = _AUDIO_EXT.get(artifact.content_type, "bin")
+        name = f"c{level:03d}_r{index:03d}.{ext}"
+        (audio_dir / name).write_bytes(artifact.data)
+        file_ref = f"audio/{name}"
+    return {
+        "concurrency": level,
+        "index": index,
+        "prompt": request.prompt,
+        "file": file_ref,
+        "success": result.success,
+        "error": result.error or None,
+        "latency_s": round(result.latency_seconds, 3),
+        "cost_usd": round(result.cost_usd, 6),
+        "scores": [
+            {"metric": s.metric, "value": s.value, "detail": s.detail}
+            for s in result.scores
+        ],
+    }
 
 
 async def _run_generation(
