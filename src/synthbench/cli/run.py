@@ -1,6 +1,9 @@
 """The ``synthbench run`` command."""
 
 import asyncio
+import json
+import re
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -49,7 +52,12 @@ def run(
         None,
         "--output",
         "-o",
-        help="Write the JSON degradation report to this path.",
+        help="Also write the JSON degradation report to this explicit path.",
+    ),
+    no_save: bool = typer.Option(
+        False,
+        "--no-save",
+        help="Do not save the run bundle (audio + manifest + snapshot + report).",
     ),
 ) -> None:
     """Run a quality-under-load benchmark scenario against a provider."""
@@ -73,13 +81,40 @@ def run(
         err_console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
         raise typer.Exit(code=1) from exc
 
-    result = _execute(scn, prompts, adapter, scorers)
+    # Save by default: a paid run always persists its outputs unless opted out.
+    run_dir: Path | None = None
+    if not no_save:
+        run_dir = _make_run_dir(scn)
+        _write_snapshot(scn, run_dir / "scenario.snapshot.json")
+
+    result = _execute(scn, prompts, adapter, scorers, artifact_dir=run_dir)
 
     summary = analyze(result, scn.thresholds)
     print_report(result, summary, console=console)
+
+    if run_dir is not None:
+        write_report(result, scn.thresholds, summary, run_dir / "report.json")
+        console.print(f"\n[dim]Run bundle saved to {escape(str(run_dir))}/[/dim]")
     if output is not None:
         write_report(result, scn.thresholds, summary, output)
-        console.print(f"\n[dim]JSON report written to {escape(str(output))}[/dim]")
+        console.print(f"[dim]JSON report also written to {escape(str(output))}[/dim]")
+
+
+def _make_run_dir(scn: Scenario) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    slug = re.sub(r"[^a-z0-9]+", "-", scn.name.lower()).strip("-")[:40] or "run"
+    run_dir = Path("runs") / f"{timestamp}-{scn.provider}-{slug}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def _write_snapshot(scn: Scenario, path: Path) -> None:
+    """Persist the resolved inputs (for reproducibility) with the API key redacted."""
+    snapshot = scn.model_dump(mode="json")
+    for provider in snapshot.get("providers", {}).values():
+        if isinstance(provider, dict) and provider.get("api_key"):
+            provider["api_key"] = "***redacted***"
+    path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
 
 
 def _execute(
@@ -87,6 +122,8 @@ def _execute(
     prompts: list[str],
     adapter: ProviderAdapter,
     scorers: list[Scorer],
+    *,
+    artifact_dir: Path | None = None,
 ) -> RunResult:
     total_requests = sum(level * scn.requests_multiplier for level in scn.concurrency)
     with Progress(
@@ -111,7 +148,12 @@ def _execute(
         async def _amain() -> RunResult:
             try:
                 return await run_scenario(
-                    scn, adapter, prompts, scorers=scorers, on_progress=on_progress
+                    scn,
+                    adapter,
+                    prompts,
+                    scorers=scorers,
+                    on_progress=on_progress,
+                    artifact_dir=artifact_dir,
                 )
             finally:
                 await adapter.aclose()

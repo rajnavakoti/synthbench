@@ -28,6 +28,9 @@ env/
 
 *.jsonl
 
+# Saved run bundles (audio + manifest + report) — local evidence, can be large.
+runs/
+
 # Private strategy doc — full blueprint (moat, pricing, market, roadmap).
 # Kept in the working tree for local/agent reference; never published.
 # The public technical architecture lives in docs/ARCHITECTURE.md.

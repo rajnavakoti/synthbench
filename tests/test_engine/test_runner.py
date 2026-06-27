@@ -212,6 +212,33 @@ async def test_scores_are_attached_and_aggregated() -> None:
     assert level.avg_wer == 0.1
 
 
+async def test_artifacts_and_manifest_are_saved(tmp_path) -> None:
+    scn = make_scenario([2])
+    run_dir = tmp_path / "run"
+    await run_scenario(
+        scn, MockAdapter(), ["a", "b"], scorers=[_FakeWERScorer()], artifact_dir=run_dir
+    )
+
+    import json
+
+    audio = sorted((run_dir / "audio").glob("*.mp3"))
+    assert len(audio) == 2  # 2 clips saved (audio/mpeg -> .mp3)
+    assert all(p.stat().st_size > 0 for p in audio)
+
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert len(manifest) == 2
+    rec = manifest[0]
+    assert rec["prompt"] in ("a", "b")
+    assert rec["file"].startswith("audio/")
+    assert any(s["metric"] == "wer" for s in rec["scores"])
+
+
+async def test_no_artifact_dir_writes_nothing(tmp_path) -> None:
+    scn = make_scenario([1])
+    await run_scenario(scn, MockAdapter(), ["a"])  # artifact_dir=None
+    assert list(tmp_path.iterdir()) == []
+
+
 async def test_scorer_failure_does_not_crash_run() -> None:
     scn = make_scenario([1])
     result = await run_scenario(scn, MockAdapter(), ["a"], scorers=[_BoomScorer()])

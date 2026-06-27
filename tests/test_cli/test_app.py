@@ -165,7 +165,9 @@ def test_run_executes_with_mock_adapter(
         run_module, "create_adapter", lambda name, config: _CliMockAdapter()
     )
     # metrics = ["latency"] needs no scoring libs, so this exercises pure
-    # execution wiring without the [audio] extra.
+    # execution wiring without the [audio] extra. chdir to tmp so the
+    # save-by-default run bundle lands under tmp, not the repo.
+    monkeypatch.chdir(tmp_path)
     content = VALID_SCENARIO + '\n[scoring]\nmetrics = ["latency"]\n'
     out_path = tmp_path / "report.json"
     result = runner.invoke(
@@ -183,14 +185,69 @@ def test_run_executes_with_mock_adapter(
     assert "degradation curve" in output
     assert "within budget" in output
 
-    # JSON report written and well-formed.
     import json
 
+    # Explicit --output report.
     report = json.loads(out_path.read_text(encoding="utf-8"))
     assert report["schema_version"] == 1
     assert report["provider"] == "openai"
     assert len(report["levels"]) == 2  # concurrency [1, 5]
     assert all("verdict" in level for level in report["levels"])
+
+    # Save-by-default: a run bundle exists with audio, manifest, snapshot, report.
+    run_dirs = list((tmp_path / "runs").iterdir())
+    assert len(run_dirs) == 1
+    bundle = run_dirs[0]
+    assert (bundle / "manifest.json").exists()
+    assert (bundle / "report.json").exists()
+    assert list((bundle / "audio").glob("*.mp3"))  # clips saved
+    # Snapshot must NOT contain the real API key.
+    snapshot = (bundle / "scenario.snapshot.json").read_text()
+    assert "sk-" not in snapshot or "redacted" in snapshot
+
+
+def test_run_no_save_skips_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from synthbench.cli import run as run_module
+    from synthbench.providers.base import (
+        GenerationArtifact,
+        GenerationJob,
+        GenerationRequest,
+        GenerationStatus,
+        ProviderAdapter,
+    )
+
+    class _Mock(ProviderAdapter):
+        @property
+        def name(self) -> str:
+            return "openai"
+
+        def estimate_cost_usd(self, request: GenerationRequest) -> float:
+            return 0.001
+
+        async def submit(self, request: GenerationRequest) -> GenerationJob:
+            return GenerationJob(
+                request=request,
+                status=GenerationStatus.SUCCEEDED,
+                artifact=GenerationArtifact(data=b"x", content_type="audio/mpeg"),
+            )
+
+        async def poll(self, job: GenerationJob) -> GenerationJob:
+            return job
+
+        async def retrieve(self, job: GenerationJob) -> GenerationArtifact:
+            assert job.artifact is not None
+            return job.artifact
+
+    monkeypatch.setattr(run_module, "create_adapter", lambda name, config: _Mock())
+    monkeypatch.chdir(tmp_path)
+    content = VALID_SCENARIO + '\n[scoring]\nmetrics = ["latency"]\n'
+    result = runner.invoke(
+        app, ["run", "--scenario", str(_scenario(tmp_path, content)), "--no-save"]
+    )
+    assert result.exit_code == 0
+    assert not (tmp_path / "runs").exists()  # nothing saved
 
 
 def test_run_missing_api_key_exits_nonzero(tmp_path: Path, monkeypatch) -> None:
