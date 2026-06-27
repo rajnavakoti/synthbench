@@ -22,6 +22,7 @@ already in a terminal ``SUCCEEDED`` state carrying the artifact, so ``poll`` and
 
 import hashlib
 import json
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -41,6 +42,25 @@ class ProviderError(Exception):
     failed result). A remote job that *reports* failure is instead surfaced as
     ``GenerationStatus.FAILED`` on the job — see the module docstring.
     """
+
+
+def resolve_api_key(config_value: str | None, env_var: str, provider_label: str) -> str:
+    """Resolve an API key from a scenario value or the environment.
+
+    The scenario loader expands ``${VAR}`` references, so a resolved value is
+    used directly. An unresolved token (the env var was unset at load time) or
+    an omitted key falls back to reading ``env_var`` from the environment.
+    Shared by all adapters so auth resolution lives in one place.
+    """
+    if config_value and "${" not in config_value:
+        return config_value
+    env_value = os.environ.get(env_var)
+    if env_value:
+        return env_value
+    raise ProviderError(
+        f"missing {provider_label} API key: set the {env_var} environment "
+        "variable or provide 'api_key' in the scenario"
+    )
 
 
 class GenerationStatus(StrEnum):

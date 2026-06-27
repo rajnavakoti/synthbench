@@ -1,0 +1,32 @@
+[scenario]
+name = "OpenAI TTS stress test"
+provider = "openai"
+modality = "tts"
+concurrency = [1, 5, 10, 25, 50]
+budget_limit_usd = 5.00
+
+[provider.openai]
+api_key = "${OPENAI_API_KEY}"
+model = "tts-1"
+voice = "alloy"
+# Optional: override the built-in cost estimate (USD per 1M characters).
+# cost_per_million_chars = 15.0
+
+[prompts]
+source = "inline"
+texts = [
+    "The quick brown fox jumps over the lazy dog.",
+    "In the beginning, there was nothing. Then there was everything.",
+    "Please confirm your appointment for Tuesday at three thirty PM.",
+    "The total comes to four hundred and twenty-seven dollars and sixty-three cents.",
+]
+
+[scoring]
+metrics = ["latency", "wer", "duration_accuracy", "file_integrity"]
+whisper_model = "base"
+
+[thresholds]
+warn_wer = 0.05
+fail_wer = 0.10
+warn_latency_p95 = 10.0
+fail_latency_p95 = 30.0
