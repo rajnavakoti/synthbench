@@ -5,6 +5,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
@@ -21,6 +22,8 @@ from synthbench.models import RunResult
 from synthbench.pricing import estimate_text_cost
 from synthbench.providers.base import ProviderAdapter, ProviderError
 from synthbench.providers.registry import create_adapter
+from synthbench.scoring.base import Scorer, ScoringError
+from synthbench.scoring.registry import build_scorers
 
 console = Console()
 err_console = Console(stderr=True)
@@ -51,7 +54,7 @@ def run(
         scn = load_scenario(scenario)
         prompts = scn.resolve_prompts()
     except ScenarioError as exc:
-        err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        err_console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
         raise typer.Exit(code=1) from exc
 
     _print_summary(scn, prompts)
@@ -62,15 +65,21 @@ def run(
 
     try:
         adapter = create_adapter(scn.provider, scn.provider_config)
-    except ProviderError as exc:
-        err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        scorers = build_scorers(scn.scoring)
+    except (ProviderError, ScoringError) as exc:
+        err_console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
         raise typer.Exit(code=1) from exc
 
-    result = _execute(scn, prompts, adapter)
+    result = _execute(scn, prompts, adapter, scorers)
     _print_result(result)
 
 
-def _execute(scn: Scenario, prompts: list[str], adapter: ProviderAdapter) -> RunResult:
+def _execute(
+    scn: Scenario,
+    prompts: list[str],
+    adapter: ProviderAdapter,
+    scorers: list[Scorer],
+) -> RunResult:
     total_requests = sum(level * scn.requests_multiplier for level in scn.concurrency)
     with Progress(
         SpinnerColumn(),
@@ -94,7 +103,7 @@ def _execute(scn: Scenario, prompts: list[str], adapter: ProviderAdapter) -> Run
         async def _amain() -> RunResult:
             try:
                 return await run_scenario(
-                    scn, adapter, prompts, on_progress=on_progress
+                    scn, adapter, prompts, scorers=scorers, on_progress=on_progress
                 )
             finally:
                 await adapter.aclose()

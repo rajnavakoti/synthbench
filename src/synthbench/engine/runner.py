@@ -19,7 +19,13 @@ from statistics import mean
 
 from synthbench.config.scenario import Scenario
 from synthbench.engine.budget import BudgetGuard
-from synthbench.models import ConcurrencyResult, GenerationResult, RunResult, Verdict
+from synthbench.models import (
+    ConcurrencyResult,
+    GenerationResult,
+    RunResult,
+    ScoreResult,
+    Verdict,
+)
 from synthbench.providers.base import (
     GenerationArtifact,
     GenerationRequest,
@@ -112,9 +118,13 @@ async def _run_level(
         if not await guard.reserve(est_cost):
             return False
         async with semaphore:
-            result = await _execute_one(
-                request, level, adapter, scenario, scorers, est_cost
+            result, artifact = await _run_generation(
+                request, level, adapter, scenario, est_cost
             )
+        # Score outside the concurrency slot: scoring is local post-processing
+        # and must not hold a provider slot, which would throttle real load.
+        if result.success and artifact is not None and scorers:
+            result.scores = await _score(artifact, request.prompt, scorers)
         async with results_lock:
             results.append(result)
         if on_progress is not None:
@@ -126,14 +136,14 @@ async def _run_level(
     return _aggregate(level, results, incomplete)
 
 
-async def _execute_one(
+async def _run_generation(
     request: GenerationRequest,
     level: int,
     adapter: ProviderAdapter,
     scenario: Scenario,
-    scorers: list[Scorer],
     est_cost: float,
-) -> GenerationResult:
+) -> tuple[GenerationResult, GenerationArtifact | None]:
+    """Run one request's lifecycle (timed, with retries). Scoring is separate."""
     start = time.perf_counter()
     artifact: GenerationArtifact | None = None
     error = ""
@@ -154,23 +164,37 @@ async def _execute_one(
             await asyncio.sleep(_BACKOFF_BASE_S * (2**attempt))
 
     latency = time.perf_counter() - start
-    success = artifact is not None
-
-    scores = []
-    if success and scorers:
-        for scorer in scorers:
-            scores.append(await scorer.score(artifact.data, request.prompt))
-
-    return GenerationResult(
+    result = GenerationResult(
         prompt=request.prompt,
         concurrency_level=level,
         latency_seconds=latency,
         cost_usd=est_cost,
         artifact_bytes=artifact.size_bytes if artifact else 0,
-        success=success,
+        success=artifact is not None,
         error=error,
-        scores=scores,
+        scores=[],
     )
+    return result, artifact
+
+
+async def _score(
+    artifact: GenerationArtifact, prompt: str, scorers: list[Scorer]
+) -> list[ScoreResult]:
+    scores: list[ScoreResult] = []
+    for scorer in scorers:
+        try:
+            scores.append(await scorer.score(artifact.data, prompt))
+        except Exception as exc:  # noqa: BLE001 - one bad scorer must not sink the run
+            scores.append(
+                ScoreResult(
+                    metric=scorer.metric_name,
+                    value=0.0,
+                    unit="",
+                    verdict=Verdict.FAIL,
+                    detail=f"scoring error: {exc}",
+                )
+            )
+    return scores
 
 
 async def _submit_poll_retrieve(
@@ -190,7 +214,12 @@ def _aggregate(
 ) -> ConcurrencyResult:
     successful = [r for r in results if r.success]
     latencies = sorted(r.latency_seconds for r in successful)
-    wers = [s.value for r in successful for s in r.scores if s.metric == "wer"]
+    wers = [
+        s.value
+        for r in successful
+        for s in r.scores
+        if s.metric == "wer" and s.verdict is not Verdict.FAIL
+    ]
     return ConcurrencyResult(
         concurrency_level=level,
         generations=results,
