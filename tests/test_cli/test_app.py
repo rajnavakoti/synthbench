@@ -90,6 +90,24 @@ def test_dry_run_prints_plan_and_cost(tmp_path: Path) -> None:
     assert "budget" in output.lower()
 
 
+def test_dry_run_cost_override_changes_total(tmp_path: Path) -> None:
+    # Same scenario, with a high per-million override, should cost more.
+    base = runner.invoke(
+        app, ["run", "--scenario", str(_scenario(tmp_path)), "--dry-run"]
+    )
+    with_override = VALID_SCENARIO.replace(
+        'model = "tts-1"', 'model = "tts-1"\ncost_per_million_chars = 5000.0'
+    )
+    overridden = runner.invoke(
+        app,
+        ["run", "--scenario", str(_scenario(tmp_path, with_override)), "--dry-run"],
+    )
+    assert base.exit_code == 0
+    assert overridden.exit_code == 0
+    # The override is ~333x the OpenAI tts-1 default, so the total must differ.
+    assert _plain(base.output) != _plain(overridden.output)
+
+
 def test_invalid_scenario_exits_nonzero(tmp_path: Path) -> None:
     bad = VALID_SCENARIO.replace("budget_limit_usd = 5.0\n", "")
     result = runner.invoke(app, ["run", "--scenario", str(_scenario(tmp_path, bad))])

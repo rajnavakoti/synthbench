@@ -15,6 +15,7 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
 packages = [{include = "synthbench", from = "src"}]
+include = [{path = "src/synthbench/pricing.toml", format = ["sdist", "wheel"]}]
 
 [tool.poetry.scripts]
 synthbench = "synthbench.cli.app:app"

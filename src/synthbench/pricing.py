@@ -1,45 +1,76 @@
-"""Per-character pricing estimates for TTS providers.
+"""Cost estimation for TTS providers.
 
-Used by the ``--dry-run`` pre-flight cost estimate and, once provider adapters
-land, by their ``estimate_cost()`` implementations so a single pricing source
-of truth backs both the plan and the live run.
+Default rates live in the bundled ``pricing.toml`` data file — not in this
+module — so they can be edited without touching code. A scenario may override a
+provider's rate for a single run via ``cost_per_million_chars`` in its
+``[provider.<name>]`` section; callers pass that through as
+``override_per_million``.
 
-Rates are USD per character and are approximate — providers change pricing and
-tiers frequently. Treat these as planning estimates, not invoices.
+Rates are USD per million characters and are approximate — planning estimates,
+not invoices. Because TTS APIs do not return a charged cost, this estimate (and
+its override) fully determines the cost axis of the degradation curve.
 """
 
-# USD per character, keyed by provider then model. ``"_default"`` is the
-# per-provider fallback used when the configured model is not listed.
-_PRICING: dict[str, dict[str, float]] = {
-    "elevenlabs": {
-        # ~$0.30 per 1,000 characters on mid usage tiers (plan-dependent).
-        "_default": 0.30 / 1_000,
-    },
-    "openai": {
-        "tts-1": 15.0 / 1_000_000,
-        "tts-1-hd": 30.0 / 1_000_000,
-        "_default": 15.0 / 1_000_000,
-    },
-}
+import tomllib
+from importlib import resources
 
-# Fallback when the provider itself is unknown.
-_GLOBAL_DEFAULT = 0.30 / 1_000
+# Last-resort rate (USD / 1M chars) if the data file lacks a fallback.
+_FALLBACK_PER_MILLION = 300.0
 
 
-def per_character_rate(provider: str, model: str | None = None) -> float:
-    """Return the USD-per-character rate for a provider/model.
+def _load_defaults() -> dict[str, dict[str, float]]:
+    with resources.files("synthbench").joinpath("pricing.toml").open("rb") as handle:
+        return tomllib.load(handle)
 
-    Falls back to the provider default, then a global default, so callers
-    always receive a usable estimate even for unconfigured models.
+
+_DEFAULTS = _load_defaults()
+
+
+def _global_default_per_million() -> float:
+    return _DEFAULTS.get("fallback", {}).get("default", _FALLBACK_PER_MILLION)
+
+
+def per_million_rate(provider: str, model: str | None = None) -> float:
+    """Return the default USD-per-million-character rate for a provider/model.
+
+    Falls back to the provider default, then a global default, so callers always
+    receive a usable estimate even for unconfigured models.
     """
-    table = _PRICING.get(provider.lower())
+    table = _DEFAULTS.get(provider.lower())
     if table is None:
-        return _GLOBAL_DEFAULT
+        return _global_default_per_million()
     if model is not None and model in table:
         return table[model]
-    return table.get("_default", _GLOBAL_DEFAULT)
+    return table.get("default", _global_default_per_million())
 
 
-def estimate_text_cost(text: str, provider: str, model: str | None = None) -> float:
+def per_character_rate(
+    provider: str,
+    model: str | None = None,
+    *,
+    override_per_million: float | None = None,
+) -> float:
+    """Return the USD-per-character rate, honoring a per-run override.
+
+    When ``override_per_million`` is given it wins over the bundled defaults —
+    this is the scenario's ``cost_per_million_chars``.
+    """
+    per_million = (
+        override_per_million
+        if override_per_million is not None
+        else per_million_rate(provider, model)
+    )
+    return per_million / 1_000_000
+
+
+def estimate_text_cost(
+    text: str,
+    provider: str,
+    model: str | None = None,
+    *,
+    override_per_million: float | None = None,
+) -> float:
     """Estimate the USD cost of generating audio for ``text``."""
-    return len(text) * per_character_rate(provider, model)
+    return len(text) * per_character_rate(
+        provider, model, override_per_million=override_per_million
+    )

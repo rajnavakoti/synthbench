@@ -1,0 +1,27 @@
+# Default cost estimates for TTS providers, in USD per 1,000,000 characters.
+#
+# These are APPROXIMATE planning estimates, not invoices — providers change
+# pricing and tiers often. Edit these defaults freely (this is data, not code),
+# or override for a single run with `cost_per_million_chars` in a scenario's
+# [provider.<name>] section.
+#
+# Note: neither OpenAI nor ElevenLabs returns a charged cost in the TTS
+# response, so the cost axis of the degradation curve is computed entirely from
+# (character count x the rate below). If your contracted rate differs, set the
+# scenario override so the cost axis is accurate for you.
+
+[elevenlabs]
+# ElevenLabs bills via tiered subscription credits, not a flat public rate.
+# ~$0.30 / 1k chars = $300 / 1M (Creator-tier overage). Lower on higher tiers
+# (Pro ~$240, Scale ~$180) and on Turbo/Flash models. Override per your plan.
+default = 300.0
+
+[openai]
+# OpenAI publishes flat list prices per 1M characters.
+"tts-1" = 15.0
+"tts-1-hd" = 30.0
+default = 15.0
+
+# Used when the provider itself is unknown.
+[fallback]
+default = 300.0

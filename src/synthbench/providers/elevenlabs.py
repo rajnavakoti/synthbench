@@ -69,6 +69,7 @@ class ElevenLabsAdapter(ProviderAdapter):
         model: str = DEFAULT_MODEL,
         output_format: str = DEFAULT_OUTPUT_FORMAT,
         *,
+        cost_per_million_chars: float | None = None,
         base_url: str | None = None,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
@@ -76,6 +77,7 @@ class ElevenLabsAdapter(ProviderAdapter):
         self.voice_id = voice_id
         self.model = model
         self.output_format = output_format
+        self.cost_per_million_chars = cost_per_million_chars
         self.base_url = base_url or self.BASE_URL
         self._session = session
         self._owns_session = session is None
@@ -94,6 +96,7 @@ class ElevenLabsAdapter(ProviderAdapter):
             model=config.model or DEFAULT_MODEL,
             output_format=getattr(config, "output_format", None)
             or DEFAULT_OUTPUT_FORMAT,
+            cost_per_million_chars=config.cost_per_million_chars,
         )
 
     @property
@@ -102,7 +105,12 @@ class ElevenLabsAdapter(ProviderAdapter):
 
     def estimate_cost_usd(self, request: GenerationRequest) -> CostUsd:
         model = request.model or self.model
-        return estimate_text_cost(request.prompt, "elevenlabs", model)
+        return estimate_text_cost(
+            request.prompt,
+            "elevenlabs",
+            model,
+            override_per_million=self.cost_per_million_chars,
+        )
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
