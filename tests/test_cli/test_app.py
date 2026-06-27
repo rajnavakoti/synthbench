@@ -4,6 +4,7 @@ import re
 import textwrap
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from synthbench.cli.app import app
@@ -70,7 +71,10 @@ def test_run_help_lists_options() -> None:
 
 
 def test_run_prints_summary(tmp_path: Path) -> None:
-    result = runner.invoke(app, ["run", "--scenario", str(_scenario(tmp_path))])
+    # The summary panel renders in dry-run too; assert on it without executing.
+    result = runner.invoke(
+        app, ["run", "--scenario", str(_scenario(tmp_path)), "--dry-run"]
+    )
     output = _plain(result.output)
     assert result.exit_code == 0
     assert "CLI test" in output
@@ -85,8 +89,8 @@ def test_dry_run_prints_plan_and_cost(tmp_path: Path) -> None:
     output = _plain(result.output)
     assert result.exit_code == 0
     assert "Dry run" in output
-    # 2 prompts x 2 concurrency levels = 4 requests.
-    assert "4 requests" in output
+    # concurrency [1, 5], k=1 -> 1 + 5 = 6 requests.
+    assert "6 requests" in output
     assert "budget" in output.lower()
 
 
@@ -119,3 +123,57 @@ def test_missing_scenario_file_exits_nonzero(tmp_path: Path) -> None:
     result = runner.invoke(app, ["run", "--scenario", str(tmp_path / "missing.toml")])
     assert result.exit_code == 1
     assert "not found" in _plain(result.output).lower()
+
+
+def test_run_executes_with_mock_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Patch the registry so the run executes against an in-memory adapter
+    # instead of calling a real provider.
+    from synthbench.cli import run as run_module
+    from synthbench.providers.base import (
+        GenerationArtifact,
+        GenerationJob,
+        GenerationRequest,
+        GenerationStatus,
+        ProviderAdapter,
+    )
+
+    class _CliMockAdapter(ProviderAdapter):
+        @property
+        def name(self) -> str:
+            return "openai"
+
+        def estimate_cost_usd(self, request: GenerationRequest) -> float:
+            return 0.001
+
+        async def submit(self, request: GenerationRequest) -> GenerationJob:
+            return GenerationJob(
+                request=request,
+                status=GenerationStatus.SUCCEEDED,
+                artifact=GenerationArtifact(data=b"x", content_type="audio/mpeg"),
+            )
+
+        async def poll(self, job: GenerationJob) -> GenerationJob:
+            return job
+
+        async def retrieve(self, job: GenerationJob) -> GenerationArtifact:
+            assert job.artifact is not None
+            return job.artifact
+
+    monkeypatch.setattr(
+        run_module, "create_adapter", lambda name, config: _CliMockAdapter()
+    )
+    result = runner.invoke(app, ["run", "--scenario", str(_scenario(tmp_path))])
+    output = _plain(result.output)
+    assert result.exit_code == 0
+    assert "Results" in output
+    assert "within budget" in output
+
+
+def test_run_missing_api_key_exits_nonzero(tmp_path: Path, monkeypatch) -> None:
+    # No OPENAI_API_KEY and none in the scenario -> adapter construction fails.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    result = runner.invoke(app, ["run", "--scenario", str(_scenario(tmp_path))])
+    assert result.exit_code == 1
+    assert "api key" in _plain(result.output).lower()

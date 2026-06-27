@@ -17,6 +17,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    NonNegativeInt,
     PositiveFloat,
     PositiveInt,
     ValidationError,
@@ -107,6 +108,15 @@ class Scenario(BaseModel):
     modality: Literal["tts"] = "tts"
     concurrency: list[PositiveInt] = Field(min_length=1)
     budget_limit_usd: PositiveFloat
+    # Requests issued per level = concurrency_level * requests_multiplier
+    # (the prompt set is cycled to fill them). Default 1 = exactly N per level.
+    requests_multiplier: PositiveInt = 1
+    # Halt the run when cumulative estimated cost reaches this fraction of
+    # budget_limit_usd.
+    budget_guard_pct: float = Field(default=0.9, gt=0, le=1)
+    # Per-request timeout (full submit->retrieve lifecycle) and retry budget.
+    request_timeout_s: PositiveFloat = 60.0
+    max_retries: NonNegativeInt = 1
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     prompts: PromptConfig
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
