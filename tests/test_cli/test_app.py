@@ -164,7 +164,12 @@ def test_run_executes_with_mock_adapter(
     monkeypatch.setattr(
         run_module, "create_adapter", lambda name, config: _CliMockAdapter()
     )
-    result = runner.invoke(app, ["run", "--scenario", str(_scenario(tmp_path))])
+    # metrics = ["latency"] needs no scoring libs, so this exercises pure
+    # execution wiring without the [audio] extra.
+    content = VALID_SCENARIO + '\n[scoring]\nmetrics = ["latency"]\n'
+    result = runner.invoke(
+        app, ["run", "--scenario", str(_scenario(tmp_path, content))]
+    )
     output = _plain(result.output)
     assert result.exit_code == 0
     assert "Results" in output
@@ -174,6 +179,27 @@ def test_run_executes_with_mock_adapter(
 def test_run_missing_api_key_exits_nonzero(tmp_path: Path, monkeypatch) -> None:
     # No OPENAI_API_KEY and none in the scenario -> adapter construction fails.
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    result = runner.invoke(app, ["run", "--scenario", str(_scenario(tmp_path))])
+    content = VALID_SCENARIO + '\n[scoring]\nmetrics = ["latency"]\n'
+    result = runner.invoke(
+        app, ["run", "--scenario", str(_scenario(tmp_path, content))]
+    )
     assert result.exit_code == 1
     assert "api key" in _plain(result.output).lower()
+
+
+def test_run_missing_audio_extra_exits_nonzero(tmp_path: Path, monkeypatch) -> None:
+    # A scenario asking for WER fails fast (before any API call) when the audio
+    # extra is not installed.
+    import importlib.util
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    # Provide an API key so adapter creation succeeds and we reach scorer build.
+    content = VALID_SCENARIO.replace(
+        'model = "tts-1"', 'model = "tts-1"\napi_key = "sk-test"'
+    )
+    content += '\n[scoring]\nmetrics = ["wer"]\n'
+    result = runner.invoke(
+        app, ["run", "--scenario", str(_scenario(tmp_path, content))]
+    )
+    assert result.exit_code == 1
+    assert "synthbench[audio]" in _plain(result.output)

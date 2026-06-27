@@ -4,6 +4,7 @@ import asyncio
 
 from synthbench.config.scenario import PromptConfig, ProviderConfig, Scenario
 from synthbench.engine.runner import ProgressEvent, run_scenario
+from synthbench.models import ScoreResult, Verdict
 from synthbench.providers.base import (
     GenerationArtifact,
     GenerationJob,
@@ -12,6 +13,7 @@ from synthbench.providers.base import (
     ProviderAdapter,
     ProviderError,
 )
+from synthbench.scoring.base import Scorer
 
 
 class MockAdapter(ProviderAdapter):
@@ -178,3 +180,44 @@ async def test_progress_callback_fires_per_completed_request() -> None:
     await run_scenario(scn, adapter, ["a"], on_progress=events.append)
     assert len(events) == 3
     assert events[-1].cumulative_cost > 0
+
+
+class _FakeWERScorer(Scorer):
+    @property
+    def metric_name(self) -> str:
+        return "wer"
+
+    async def score(
+        self, artifact: bytes, prompt: str, **kwargs: object
+    ) -> ScoreResult:
+        return ScoreResult(metric="wer", value=0.1, unit="ratio")
+
+
+class _BoomScorer(Scorer):
+    @property
+    def metric_name(self) -> str:
+        return "wer"
+
+    async def score(
+        self, artifact: bytes, prompt: str, **kwargs: object
+    ) -> ScoreResult:
+        raise RuntimeError("boom")
+
+
+async def test_scores_are_attached_and_aggregated() -> None:
+    scn = make_scenario([2])
+    result = await run_scenario(scn, MockAdapter(), ["a"], scorers=[_FakeWERScorer()])
+    level = result.concurrency_results[0]
+    assert all(any(s.metric == "wer" for s in g.scores) for g in level.generations)
+    assert level.avg_wer == 0.1
+
+
+async def test_scorer_failure_does_not_crash_run() -> None:
+    scn = make_scenario([1])
+    result = await run_scenario(scn, MockAdapter(), ["a"], scorers=[_BoomScorer()])
+    gen = result.concurrency_results[0].generations[0]
+    assert gen.success is True  # generation succeeded; only scoring failed
+    wer_score = next(s for s in gen.scores if s.metric == "wer")
+    assert wer_score.verdict is Verdict.FAIL
+    # a failed WER score is excluded from the level average
+    assert result.concurrency_results[0].avg_wer is None

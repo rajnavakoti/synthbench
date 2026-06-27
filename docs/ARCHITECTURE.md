@@ -120,10 +120,26 @@ the engine builds the benchmarkable `GenerationResult` from a terminal job.
 
 `Scorer` (`scoring/base.py`) is the pluggable scoring interface; each scorer
 returns a `ScoreResult` (`metric`, `value`, `unit`, `verdict`, `detail`). The
-engine attaches scores to each `GenerationResult`, and the reporting layer
-aggregates them per concurrency level into the curve. Phase 1 ships audio
-scorers only; advanced scorers (MOS, speaker similarity) and other modalities
-arrive in later phases behind the same interface.
+engine attaches scores to each `GenerationResult` **after releasing the
+concurrency slot** — scoring is local post-processing and must not hold a
+provider slot, which would throttle real load. The reporting layer aggregates
+scores per concurrency level into the curve.
+
+Phase 1 audio scorers (`scoring/audio/`):
+- **`wer`** — Whisper transcription + jiwer Word Error Rate vs. the input text.
+  The silent-degradation signal: WER rises before the provider outright fails.
+- **`duration_accuracy`** — actual vs. text-estimated duration (catches
+  truncation / runaway output).
+- **`file_integrity`** — the returned bytes decode to non-empty audio.
+
+These depend on the opt-in `[audio]` extra (Whisper, jiwer, soundfile). Scorers
+lazy-import their libraries and raise a clear `ScoringError` with an install hint
+if missing; `build_scorers` checks availability up front so a missing dependency
+fails **before** any paid API call. The lib-backed operation in each scorer is
+injectable, so the scoring logic is unit-tested without the heavy libraries.
+
+Advanced scorers (MOS, speaker similarity) and other modalities arrive in later
+phases behind the same interface.
 
 ## Pricing
 
