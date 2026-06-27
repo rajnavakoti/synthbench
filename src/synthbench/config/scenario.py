@@ -72,6 +72,9 @@ class ProviderConfig(BaseModel):
 
     api_key: str | None = None
     model: str | None = None
+    # Optional per-run cost override (USD per 1M characters). When set, it wins
+    # over the bundled pricing defaults for this provider's cost estimates.
+    cost_per_million_chars: float | None = None
 
 
 class ScoringConfig(BaseModel):

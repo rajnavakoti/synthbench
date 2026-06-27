@@ -9,6 +9,9 @@ budget_limit_usd = 5.00
 api_key = "${ELEVENLABS_API_KEY}"
 model = "eleven_multilingual_v2"
 voice_id = "21m00Tcm4TlvDq8ikWAM"
+# Optional: override the built-in cost estimate (USD per 1M characters) with
+# your actual plan rate, so the cost axis is accurate for you.
+# cost_per_million_chars = 180.0
 
 [prompts]
 source = "inline"

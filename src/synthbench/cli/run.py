@@ -74,9 +74,13 @@ def _print_summary(scn: Scenario, prompts: list[str]) -> None:
 
 def _print_dry_run(scn: Scenario, prompts: list[str]) -> None:
     model = scn.provider_config.model
+    override = scn.provider_config.cost_per_million_chars
     # Each concurrency level runs the full prompt set, so per-level cost is the
     # same; total scales by the number of levels.
-    per_level_cost = sum(estimate_text_cost(p, scn.provider, model) for p in prompts)
+    per_level_cost = sum(
+        estimate_text_cost(p, scn.provider, model, override_per_million=override)
+        for p in prompts
+    )
 
     table = Table(title="Dry run — execution plan")
     table.add_column("Concurrency", justify="right")

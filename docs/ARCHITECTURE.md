@@ -127,10 +127,24 @@ arrive in later phases behind the same interface.
 
 ## Pricing
 
-`pricing.py` is the single source of truth for per-character cost estimates. It
-backs both the CLI dry-run estimate and each adapter's `estimate_cost_usd`, so
-the plan and the live run never disagree. Rates are approximate planning
-estimates, not invoices.
+`pricing.py` is the single resolver for cost estimates; it backs both the CLI
+dry-run estimate and each adapter's `estimate_cost_usd`, so the plan and the live
+run never disagree. Default rates live in the bundled, editable **`pricing.toml`**
+data file (USD per 1M characters) — they are data, not code, so they can be
+changed without touching logic.
+
+Resolution is layered, most-specific first:
+
+```
+scenario [provider.x] cost_per_million_chars   ← per-run override (contracted rate)
+        ↓ falls back to
+bundled pricing.toml defaults                   ← editable shipped data
+```
+
+Rates are approximate planning estimates, not invoices. Because TTS APIs do not
+return a charged cost in the response, this estimate (plus any override) fully
+determines the cost axis of the degradation curve — so a user on a non-default
+plan should set the scenario override to keep that axis accurate.
 
 ## Technology stack
 

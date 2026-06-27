@@ -136,6 +136,20 @@ def test_estimate_cost_usd_delegates_to_pricing() -> None:
     assert adapter.estimate_cost_usd(request) == expected
 
 
+def test_estimate_cost_usd_uses_scenario_override() -> None:
+    adapter = ElevenLabsAdapter(
+        api_key="key", voice_id="voice", cost_per_million_chars=180.0
+    )
+    request = _request(prompt="hello")
+    assert adapter.estimate_cost_usd(request) == len("hello") * (180.0 / 1_000_000)
+
+
+def test_from_config_reads_cost_override() -> None:
+    config = ProviderConfig(api_key="k", voice_id="vv", cost_per_million_chars=240.0)
+    adapter = ElevenLabsAdapter.from_config(config)
+    assert adapter.cost_per_million_chars == 240.0
+
+
 def test_parse_rate_limit_reads_headers() -> None:
     adapter = ElevenLabsAdapter(api_key="key", voice_id="voice")
     info = adapter.parse_rate_limit(
