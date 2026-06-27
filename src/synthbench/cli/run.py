@@ -22,6 +22,9 @@ from synthbench.models import RunResult
 from synthbench.pricing import estimate_text_cost
 from synthbench.providers.base import ProviderAdapter, ProviderError
 from synthbench.providers.registry import create_adapter
+from synthbench.reporting.analysis import analyze
+from synthbench.reporting.json_report import write_report
+from synthbench.reporting.terminal import print_report
 from synthbench.scoring.base import Scorer, ScoringError
 from synthbench.scoring.registry import build_scorers
 
@@ -71,7 +74,12 @@ def run(
         raise typer.Exit(code=1) from exc
 
     result = _execute(scn, prompts, adapter, scorers)
-    _print_result(result)
+
+    summary = analyze(result, scn.thresholds)
+    print_report(result, summary, console=console)
+    if output is not None:
+        write_report(result, scn.thresholds, summary, output)
+        console.print(f"\n[dim]JSON report written to {escape(str(output))}[/dim]")
 
 
 def _execute(
@@ -164,44 +172,4 @@ def _print_dry_run(scn: Scenario, prompts: list[str]) -> None:
     console.print(
         "[dim]Cost is an estimate from per-character provider pricing; actual "
         "cost depends on the provider response.[/dim]"
-    )
-
-
-def _print_result(result: RunResult) -> None:
-    title = f"Results — {result.provider} {result.model}".strip()
-    table = Table(title=title)
-    table.add_column("Concurrency", justify="right")
-    table.add_column("Requests", justify="right")
-    table.add_column("Avg latency", justify="right")
-    table.add_column("P95 latency", justify="right")
-    table.add_column("Success", justify="right")
-    table.add_column("Cost", justify="right")
-    for cr in result.concurrency_results:
-        completed = len(cr.generations)
-        requests = str(completed)
-        if cr.incomplete:
-            requests += f" (+{cr.incomplete} skipped)"
-        table.add_row(
-            str(cr.concurrency_level),
-            requests,
-            f"{cr.avg_latency:.2f}s",
-            f"{cr.p95_latency:.2f}s",
-            f"{cr.success_rate * 100:.0f}%",
-            f"${cr.total_cost:.4f}",
-        )
-    console.print(table)
-
-    status = (
-        "[red]budget exceeded[/red]"
-        if result.budget_exceeded
-        else "[green]within budget[/green]"
-    )
-    console.print(
-        f"\n[bold]Total:[/bold] ${result.total_cost:.4f} / "
-        f"${result.budget_limit_usd:.2f} ({status}) in "
-        f"{result.total_duration_seconds:.1f}s"
-    )
-    console.print(
-        "[dim]Quality scoring (WER) and PASS/WARN/FAIL zones arrive with the "
-        "scoring and report engines (Epics 6-7).[/dim]"
     )

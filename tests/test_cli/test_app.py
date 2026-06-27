@@ -167,13 +167,30 @@ def test_run_executes_with_mock_adapter(
     # metrics = ["latency"] needs no scoring libs, so this exercises pure
     # execution wiring without the [audio] extra.
     content = VALID_SCENARIO + '\n[scoring]\nmetrics = ["latency"]\n'
+    out_path = tmp_path / "report.json"
     result = runner.invoke(
-        app, ["run", "--scenario", str(_scenario(tmp_path, content))]
+        app,
+        [
+            "run",
+            "--scenario",
+            str(_scenario(tmp_path, content)),
+            "--output",
+            str(out_path),
+        ],
     )
     output = _plain(result.output)
     assert result.exit_code == 0
-    assert "Results" in output
+    assert "degradation curve" in output
     assert "within budget" in output
+
+    # JSON report written and well-formed.
+    import json
+
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["schema_version"] == 1
+    assert report["provider"] == "openai"
+    assert len(report["levels"]) == 2  # concurrency [1, 5]
+    assert all("verdict" in level for level in report["levels"])
 
 
 def test_run_missing_api_key_exits_nonzero(tmp_path: Path, monkeypatch) -> None:
