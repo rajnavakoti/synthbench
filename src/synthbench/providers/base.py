@@ -196,3 +196,10 @@ class ProviderAdapter(ABC):
     def parse_rate_limit(self, response_headers: Mapping[str, str]) -> RateLimitInfo:
         """Parse rate limit info from response headers. Override per provider."""
         return RateLimitInfo()
+
+    async def aclose(self) -> None:
+        """Release any held resources (e.g. an HTTP session).
+
+        Default is a no-op; adapters that own a session override this. The
+        engine/CLI call it once the run completes.
+        """

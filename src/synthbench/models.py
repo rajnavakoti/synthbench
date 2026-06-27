@@ -47,6 +47,9 @@ class ConcurrencyResult:
     avg_wer: float | None = None
     total_cost: float = 0.0
     success_rate: float = 1.0
+    # Requests planned for this level but not executed (e.g. cancelled by the
+    # budget guard before submission).
+    incomplete: int = 0
     verdict: Verdict = Verdict.PASS
 
 
